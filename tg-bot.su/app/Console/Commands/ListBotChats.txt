@@ -1,0 +1,54 @@
+<?php
+
+namespace App\Console\Commands;
+
+use Illuminate\Console\Command;
+use DefStudio\Telegraph\Facades\Telegraph;
+use DefStudio\Telegraph\Models\TelegraphBot;
+use DefStudio\Telegraph\Models\TelegraphChat;
+
+class ListBotChats extends Command
+{
+    protected $signature = 'bot:list-chats';
+    protected $description = 'Ссылки на чаты';
+
+    public function handle()
+    {
+        $bot = TelegraphBot::first();
+        if (!$bot) {
+            $this->error("Бот не найден.");
+            return;
+        }
+
+        $chats = TelegraphChat::where('telegraph_bot_id', $bot->id)->get();
+        if ($chats->isEmpty()) {
+            $this->error("Нет чатов с этим ботом.");
+            return;
+        }
+
+        $userId = '';
+        $message = "Список чатов, где есть бот:\n\n";
+
+        foreach ($chats as $chat) {
+            $chatName = $chat->name ?? "Неизвестный чат";
+            $chatId = $chat->chat_id;
+            
+            if ($chat->username) {
+                $chatLink = "https://t.me/{$chat->username}";
+            } elseif ($chatId < 0) {
+                $chatLink = "https://t.me/c/" . str_replace('-100', '', $chatId);
+            } else {
+                $chatLink = "Чат без ссылки";
+            }
+
+            $message .= "- [$chatName]($chatLink)\n";
+        }
+
+        try {
+            Telegraph::bot($bot)->chat($userId)->markdown($message)->send();
+            $this->info("Сообщение успешно отправлено.");
+        } catch (\Exception $e) {
+            $this->error("Ошибка при отправке: " . $e->getMessage());
+        }
+    }
+}
