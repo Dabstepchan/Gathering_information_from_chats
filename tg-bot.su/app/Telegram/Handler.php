@@ -500,5 +500,6 @@ class Handler extends WebhookHandler
         ]);
     
         $this->chat->message('Отчет успешно сгенерирован')->send();
+        $this->showMainMenu();
     }
 }
