@@ -2,504 +2,187 @@
 
 namespace App\Telegram;
 
-use App\Models\TelegraphMessage;
+use RuntimeException;
+use App\Services\Telegram\Abstracts\MenuServiceInterface;
+use App\Services\Telegram\Abstracts\SettingsCommandServiceInterface;
+use App\Services\Telegram\Abstracts\ReportCommandServiceInterface;
+use App\Services\Telegram\Abstracts\HashtagCommandServiceInterface;
+use App\Services\Telegram\Abstracts\AuthorizationServiceInterface;
+use App\Services\Telegram\Abstracts\ChatManagementServiceInterface;
 use DefStudio\Telegraph\Handlers\WebhookHandler;
-use DefStudio\Telegraph\Telegraph;
-use DefStudio\Telegraph\Keyboard\Keyboard;
-use DefStudio\Telegraph\Keyboard\Button;
-use Illuminate\Support\Carbon;
+use DefStudio\Telegraph\DTO\User;
 use Illuminate\Support\Stringable;
-use App\Models\BotSettings;
 
 class Handler extends WebhookHandler
 {
-    protected string $timezone = 'Asia/Novokuznetsk';
+    public function __construct(
+        private readonly MenuServiceInterface $menuService,
+        private readonly SettingsCommandServiceInterface $settingsCommandService,
+        private readonly ReportCommandServiceInterface $reportCommandService,
+        private readonly HashtagCommandServiceInterface $hashtagCommandService,
+        private readonly AuthorizationServiceInterface $authorizationService,
+        private readonly ChatManagementServiceInterface $chatManagementService
+    ) {
+        parent::__construct();
+    }
 
-    protected const WEEKDAYS = [
-        'Понедельник' => 1,
-        'Вторник' => 2,
-        'Среда' => 3,
-        'Четверг' => 4,
-        'Пятница' => 5,
-        'Суббота' => 6,
-        'Воскресенье' => 7
-    ];
-
-    //Обработка входящих сообщений
     protected function handleChatMessage(Stringable $text): void
     {
-        $messageText = $text->toString();
-    
-        if (preg_match('/^#([^\s]+)\s+(.+)$/u', $messageText, $matches)) {
-            $this->handleHashtagInput($messageText);
-            return;
-        }        
-    
-        TelegraphMessage::create([
-            'telegraph_chat_id' => $this->chat->id,
-            'message' => $messageText,
-            'sent_at' => Carbon::now()->setTimezone($this->timezone),
-        ]);
+        $this->hashtagCommandService->processChatMessage($text->toString(), $this->chat);
     }
-    
-    //Проверка прав администратора
-    protected function isAdmin(): bool
+
+    protected function handleChatMemberJoined(User $member): void
     {
-        $adminId = env('ADMIN_USER_ID');
-        
-        if ($this->callbackQuery !== null) {
-            return (string)$this->callbackQuery->from()->id() === $adminId;
-        }
-        
-        if ($this->message !== null) {
-            return (string)$this->message->from()->id() === $adminId;
-        }
+        $this->chatManagementService->processBotJoined($this->chat, $member);
 
-        return false;
+        if ($member->isBot()) {
+            $this->sendWelcomeMessage();
+        }
     }
 
-    //Главное меню
+    protected function handleChatMemberLeft(User $member): void
+    {
+        $this->chatManagementService->processBotLeft($this->chat, $member);
+    }
+
+    private function sendWelcomeMessage(): void
+    {
+        $this->chat->message(
+            "Привет! 👋 Я бот для сбора отчетов. 🤖\n\n" .
+            "Теперь я буду отслеживать сообщения с хештегами в этом чате. 📊\n\n" .
+            "⚠️ Для корректной работы боту необходимы права администратора."
+        )->send();
+    }
+
     public function start(): void
     {
-        if ($this->isAdmin()) {
-            $this->showMainMenu();
-        } else {
+        if (!$this->authorizationService->isAdmin($this->getUser())) {
             $this->chat->message('У вас нет доступа к этому боту.')->send();
+            return;
         }
+
+        $this->menuService->showMainMenu($this->chat);
     }
-    
-    //Главное меню
+
     public function showMainMenu(): void
     {
-        $keyboard = Keyboard::make()
-            ->row([
-                Button::make('📊 Отчет')->action('generateReport'),
-                Button::make('⚙️ Настройки')->action('settings'),
-            ])
-            ->row([
-                Button::make('ℹ️ Информация')->action('info'),
-            ]);
-    
-        $this->chat
-            ->message('Выберите действие:')
-            ->keyboard($keyboard)
-            ->send(); 
-    }     
-    
-    //Копия меню
+        $this->guardAdmin();
+        $this->menuService->showMainMenu($this->chat);
+    }
+
     public function showMainMenu_copy(): void
     {
-        $keyboard = Keyboard::make()
-            ->row([
-                Button::make('📊 Отчет')->action('generateReport'),
-                Button::make('⚙️ Настройки')->action('settings'),
-            ])
-            ->row([
-                Button::make('ℹ️ Информация')->action('info'),
-            ]);
-    
-        $this->chat
-            ->edit($this->messageId)
-            ->message('Выберите действие:')
-            ->keyboard($keyboard)
-            ->send(); 
-    }    
+        $this->guardAdmin();
+        $this->menuService->editToMainMenu($this->chat, $this->messageId);
+    }
 
-    //Настройки
     public function settings(): void
     {
-        if (!$this->isAdmin()) {
-            return;
-        }
-
-        $keyboard = Keyboard::make()
-            ->row([Button::make('📋 Отчеты Менеджер-Клиент')->action('settings_reports')])
-            ->row([Button::make('⬅️ Назад')->action('showMainMenu_copy')]);
-
-        $this->chat
-        ->edit($this->messageId)
-        ->message('Меню настроек:')
-            ->keyboard($keyboard)
-            ->send();
+        $this->guardAdmin();
+        $this->settingsCommandService->showSettings($this->chat, $this->messageId);
     }
 
-    //Создать отчёт
-    public function generateReport(): void
-    {
-        if (!$this->isAdmin()) {
-            return;
-        }
-    
-        $keyboard = Keyboard::make()
-            ->row([Button::make('📊 Отчет Менеджер-Клиент')->action('generate_report')])
-            ->row([Button::make('⬅️ Назад')->action('showMainMenu_copy')]);
-    
-        $this->chat
-        ->edit($this->messageId)
-        ->message('Меню отчетов:')
-            ->keyboard($keyboard)
-            ->send();
-    }
-
-    //Информация
-    public function info(): void
-    {
-        if (!$this->isAdmin()) {
-            return;
-        }
-    
-        $this->chat->message("Бот для сбора отчетов из клиентских чатов.")
-            ->send();
-    }
-
-    //Настройки отчёта
     public function settings_reports(): void
     {
-        if (!$this->isAdmin()) {
-            return;
-        }
-    
-        $settings = BotSettings::query()->first();
-    
-        $message = "Текущие настройки отчета Менеджер-Клиент:\n\n";
-        $message .= "📅 День недели: " . ($settings->report_day ?? 'Понедельник') . "\n";
-        $message .= "⏰ Время сбора: " . substr($settings->report_time ?? '10:00', 0, 5) . "\n";
-        $message .= "📊 Период (недель): " . ($settings->period_weeks ?? '1') . "\n";
-        $message .= "🏷 Хештеги:\n";
-    
-        $hashtags = $settings->hashtags ?? ['#митрепорт' => 'Тут не было митрепортов'];
-    
-        foreach ($hashtags as $tag => $title) {
-            $message .= "   $tag -> $title\n";
-        }
-    
-        $keyboard = Keyboard::make()
-            ->row([Button::make('📅 Изменить день')->action('set_report_day')])
-            ->row([Button::make('⏰ Изменить время')->action('set_report_time')])
-            ->row([Button::make('📊 Изменить период')->action('set_period_weeks')])
-            ->row([Button::make('🏷 Управление хештегами')->action('manage_hashtags')])
-            ->row([Button::make('⬅️ Назад')->action('settings')]);
-    
-        $this->chat
-        ->edit($this->messageId)
-        ->message($message)
-            ->keyboard($keyboard)
-            ->send();
+        $this->guardAdmin();
+        $this->settingsCommandService->showReportSettings($this->chat, $this->messageId);
     }
 
-    //Установить день отчёта
     public function set_report_day(): void
     {
-        if (!$this->isAdmin()) {
-            return;
-        }
-
-        $keyboard = Keyboard::make();
-        foreach (self::WEEKDAYS as $day => $value) {
-            $keyboard->row([
-                Button::make($day)->action('save_report_day')->param('day', $value)
-            ]);
-        }
-        $keyboard->row([Button::make('⬅️ Назад')->action('settings_reports')]);
-
-        $this->chat
-        ->edit($this->messageId)
-        ->message('Выберите день недели для сбора отчета:')
-            ->keyboard($keyboard)
-            ->send();
+        $this->guardAdmin();
+        $this->settingsCommandService->showDaySelector($this->chat, $this->messageId);
     }
 
-    //Сохранить
     public function save_report_day(): void
     {
-        if (!$this->isAdmin()) {
-            return;
-        }
-
+        $this->guardAdmin();
         $day = $this->data->get('day');
-        $dayName = array_search($day, self::WEEKDAYS);
-
-        $settings = BotSettings::first() ?? new BotSettings();
-        $settings->report_day = $dayName;
-        $settings->save();
-
-        $this->chat->message("День сбора отчета установлен на: $dayName")
-            ->send();
-
+        $this->settingsCommandService->saveReportDay($day, $this->chat);
         $this->settings_reports();
     }
 
-    //Установить время отчёта
     public function set_report_time(): void
     {
-        if (!$this->isAdmin()) {
-            return;
-        }
-    
-        $keyboard = Keyboard::make();
-        foreach ([9, 10, 11, 12, 13, 14, 15, 16, 17] as $hour) {
-            $displayTime = sprintf('%02d:00', $hour);
-            $keyboard->row([
-                Button::make($displayTime)->action('save_report_time')->param('time', $hour)
-            ]);
-        }
-        $keyboard->row([Button::make('⬅️ Назад')->action('settings_reports')]);
-    
-        $this->chat
-        ->edit($this->messageId)
-        ->message('Выберите время сбора отчета:')
-            ->keyboard($keyboard)
-            ->send();
+        $this->guardAdmin();
+        $this->settingsCommandService->showTimeSelector($this->chat, $this->messageId);
     }
-    
-    //Сохранить
+
     public function save_report_time(): void
     {
-        if (!$this->isAdmin()) {
-            return;
-        }
-    
+        $this->guardAdmin();
         $hour = $this->data->get('time');
-        
-        if (!is_numeric($hour) || $hour < 0 || $hour > 23) {
-            $this->chat->message('Ошибка: недопустимое значение времени')
-                ->send();
-            $this->set_report_time();
-            return;
-        }
-    
-        $time = sprintf('%02d:00', (int)$hour);
-        
-        $settings = BotSettings::first() ?? new BotSettings();
-        $settings->report_time = $time;
-        $settings->save();
-    
-        $this->chat->message("Время сбора отчета установлено на: $time")
-            ->send();
-    
+        $this->settingsCommandService->saveReportTime($hour, $this->chat);
         $this->settings_reports();
     }
-    
-    //Формат времени
-    protected function formatTime(string $time): string
-    {
-        if (preg_match('/^([0-9]{2}):([0-9]{2})$/', $time)) {
-            return $time;
-        }
-        if (is_numeric($time)) {
-            return sprintf('%02d:00', (int)$time);
-        }
-        return '10:00';
-    }
 
-    //Установить период недель
     public function set_period_weeks(): void
     {
-        if (!$this->isAdmin()) {
-            return;
-        }
-
-        $keyboard = Keyboard::make();
-        foreach ([1, 2, 3, 4] as $weeks) {
-            $keyboard->row([
-                Button::make("$weeks " . $this->getWeekWord($weeks))->action('save_period_weeks')->param('weeks', $weeks)
-            ]);
-        }
-        $keyboard->row([Button::make('⬅️ Назад')->action('settings_reports')]);
-
-        $this->chat
-        ->edit($this->messageId)
-        ->message('Выберите период сбора отчета:')
-            ->keyboard($keyboard)
-            ->send();
+        $this->guardAdmin();
+        $this->settingsCommandService->showPeriodSelector($this->chat, $this->messageId);
     }
 
-    //Склонение
-    protected function getWeekWord(int $number): string
-    {
-        $lastDigit = $number % 10;
-        $lastTwoDigits = $number % 100;
-        
-        if ($lastDigit === 1 && $lastTwoDigits !== 11) {
-            return 'неделя';
-        }
-        if ($lastDigit >= 2 && $lastDigit <= 4 && ($lastTwoDigits < 12 || $lastTwoDigits > 14)) {
-            return 'недели';
-        }
-        return 'недель';
-    }
-
-    //Сохранить
     public function save_period_weeks(): void
     {
-        if (!$this->isAdmin()) {
-            return;
-        }
-
-        $weeks = (int)$this->data->get('weeks');
-        
-        $settings = BotSettings::first() ?? new BotSettings();
-        $settings->period_weeks = $weeks;
-        $settings->save();
-
-        $this->chat->message("Период сбора установлен на: $weeks " . $this->getWeekWord($weeks))
-            ->send();
-
+        $this->guardAdmin();
+        $weeks = $this->data->get('weeks');
+        $this->settingsCommandService->savePeriodWeeks($weeks, $this->chat);
         $this->settings_reports();
     }
 
-    //Управление тегами
     public function manage_hashtags(): void
     {
-        if (!$this->isAdmin()) {
-            return;
-        }
-
-        $settings = BotSettings::first() ?? new BotSettings();
-        $hashtags = $settings->hashtags ?? [];
-
-        $keyboard = Keyboard::make()
-            ->row([Button::make('➕ Добавить хештег')->action('add_hashtag')])
-            ->row([Button::make('❌ Удалить хештег')->action('remove_hashtag')]);
-
-        if (!empty($hashtags)) {
-            $message = "Текущие хештеги:\n\n";
-            foreach ($hashtags as $tag => $title) {
-                $message .= "$tag -> $title\n";
-            }
-        } else {
-            $message = "Список хештегов пуст.";
-        }
-
-        $keyboard->row([Button::make('⬅️ Назад')->action('settings_reports')]);
-
-        $this->chat
-        ->edit($this->messageId)
-        ->message($message)
-            ->keyboard($keyboard)
-            ->send();
+        $this->guardAdmin();
+        $this->hashtagCommandService->showHashtagManagement($this->chat, $this->messageId);
     }
 
-
-    //Добавить тег
     public function add_hashtag(): void
     {
-        if (!$this->isAdmin()) {
-            return;
-        }
-    
-        $this->chat->message("Отправьте хештег и заголовок в формате:\n#хештег Заголовок отчета")
-            ->send();
+        $this->guardAdmin();
+        $this->hashtagCommandService->requestHashtagInput($this->chat);
     }
 
-    //Удалить тег
     public function remove_hashtag(): void
     {
-        if (!$this->isAdmin()) {
-            \Log::info('remove_hashtag: Пользователь не админ');
-            return;
-        }
-    
-        $settings = BotSettings::first();
-        if (!$settings) {
-            \Log::info('remove_hashtag: Настройки не найдены');
-            $this->chat->message("Ошибка: настройки бота не найдены")->send();
-            $this->manage_hashtags();
-            return;
-        }
-    
-        $hashtags = $settings->hashtags ?? [];
-        \Log::info('remove_hashtag: Текущие хештеги', ['hashtags' => $hashtags]);
-    
-        if (empty($hashtags)) {
-            \Log::info('remove_hashtag: Список хештегов пуст');
-            $this->chat->message("Список хештегов пуст.")->send();
-            $this->manage_hashtags();
-            return;
-        }
-    
+        $this->guardAdmin();
         $tag = $this->data->get('tag');
+
         if ($tag) {
-            if (!array_key_exists($tag, $hashtags)) {
-                \Log::info('remove_hashtag: Хештег не найден', ['tag' => $tag]);
-                $this->chat->message("Хештег $tag не найден")->send();
-                $this->remove_hashtag();
-                return;
-            }
-    
-            unset($hashtags[$tag]);
-            $settings->hashtags = $hashtags;
-            $settings->save();
-    
-            \Log::info('remove_hashtag: Хештег удален', ['tag' => $tag]);
-            $this->chat->message("Хештег $tag успешно удален")->send();
-    
+            $this->hashtagCommandService->removeHashtag($tag, $this->chat);
             $this->manage_hashtags();
-            return;
+        } else {
+            $this->hashtagCommandService->showHashtagRemovalSelector($this->chat, $this->messageId);
         }
-    
-        $keyboard = Keyboard::make();
-        foreach ($hashtags as $tag => $title) {
-            \Log::info('remove_hashtag: Создаю кнопку для тега', ['tag' => $tag]);
-            $keyboard->row([
-                Button::make($tag)->action('remove_hashtag')->param('tag', $tag)
-            ]);
-        }
-    
-        $keyboard->row([Button::make('⬅️ Назад')->action('manage_hashtags')]);
-    
-        \Log::info('remove_hashtag: Отправляю сообщение с клавиатурой');
-        $this->chat
-        ->edit($this->messageId)
-        ->message("Выберите хештег для удаления:")
-            ->keyboard($keyboard)
-            ->send();
-    }    
+    }
 
-    //Ввод тега
-    protected function handleHashtagInput(string $text): void
+    public function generateReport(): void
     {
-        if (!preg_match('/^#([^\s]+)\s+(.+)$/u', $text, $matches)) {
-            $this->chat->message("Ошибка: Неправильный формат. Введите в формате: #тег Описание")->send();
-            return;
-        }
-    
-        $hashtag = '#' . $matches[1];
-        $title = trim($matches[2]);
-    
-        $settings = BotSettings::first() ?? new BotSettings();
-        $hashtags = $settings->hashtags ?? [];
-    
-        $hashtags[$hashtag] = $title;
-        $settings->hashtags = $hashtags;
-        $settings->save();
-    
-        $this->chat->message("Хештег $hashtag добавлен с заголовком: $title")->send();
-        $this->manage_hashtags();
-    }    
+        $this->guardAdmin();
+        $this->reportCommandService->showReportMenu($this->chat, $this->messageId);
+    }
 
-    //Создать отчёт
     public function generate_report(): void
     {
-        if (!$this->isAdmin()) {
-            return;
-        }
-    
-        $settings = BotSettings::first();
-        $now = Carbon::now($this->timezone);
-        $periodWeeks = $settings->period_weeks ?? 1;
-        
-        $startOfPeriod = $now->copy()
-            ->subWeeks($periodWeeks);
-        
-        $endOfPeriod = $now->copy();
-    
-        \Artisan::call('reports:check', [
-            '--start' => $startOfPeriod->toDateTimeString(),
-            '--end' => $endOfPeriod->toDateTimeString(),
-        ]);
-    
-        $this->chat->message('Отчет успешно сгенерирован')->send();
+        $this->guardAdmin();
+        $this->reportCommandService->generateReport($this->chat);
         $this->showMainMenu();
+    }
+
+    public function info(): void
+    {
+        $this->guardAdmin();
+        $this->chat->message("Бот для сбора отчетов из чатов.")->send();
+    }
+
+    private function guardAdmin(): void
+    {
+        if (!$this->authorizationService->isAdmin($this->getUser())) {
+            throw new RuntimeException('Доступ запрещен');
+        }
+    }
+
+    private function getUser(): ?User
+    {
+        return $this->callbackQuery?->from() ?? $this->message?->from();
     }
 }

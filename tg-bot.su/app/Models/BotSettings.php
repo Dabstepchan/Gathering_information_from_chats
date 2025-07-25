@@ -19,7 +19,7 @@ class BotSettings extends Model
     ];
 
     protected $attributes = [
-        'hashtags' => '{"#митрепорт":"","#еженедельныйотчет":""}',
+        'hashtags' => '{"#митрепорт":"Тут не было митрепортов","#еженедельныйотчет":"Тут не было еж.отчетов"}',
         'report_day' => 'Понедельник',
         'report_time' => '10:00',
         'period_weeks' => 1
